@@ -84,7 +84,8 @@ module.exports = function(env) {
       // gradients will be computed.
       this.paramsSeen = {};
       this.logp = this.logq = this.logr = 0;
-
+      this.objective = 0;
+      
       return this.wpplFn(_.clone(this.s), function() {
 
         var _logq = ad.value(this.logq);
@@ -125,12 +126,12 @@ module.exports = function(env) {
           console.log('ELBO: Using ' + estName + ' estimator.');
         }
 
-        var objective = useLR ?
-              this.logq * scoreDiff :
-              this.logr * scoreDiff + this.logq - this.logp;
-
-        if (ad.isLifted(objective)) { // handle guides with zero parameters
-          objective.backprop();
+        if (!useLR) {
+          this.objective += this.logq - this.logp;
+        }
+        
+        if (ad.isLifted(this.objective)) { // handle guides with zero parameters
+          this.objective.backprop();
         }
 
         var grads = _.mapObject(this.paramsSeen, function(params) {
@@ -174,29 +175,32 @@ module.exports = function(env) {
         var baseDist = dist.base();
         var z = baseDist.sample();
         this.logr += baseDist.score(z);
+        
         val = dist.transform(z);
-        this.logq += dist.score(val);
-
+        var qscore = dist.score(val)
+        this.logq += qscore;
+        this.objective += ad.value(qscore) * this.logr
       } else if (options.reparam && !(dist.base && dist.transform)) {
         // Warn when reparameterization is explicitly requested but
         // isn't supported by the distribution.
         throw dist + ' does not support reparameterization.';
       } else {
         val = dist.sample();
-        var score = dist.score(val);
+        var qscore = dist.score(val);
 
         if (sameAdNode(this.logq, this.logr)) {
           // The reparameterization trick has not been used yet.
           // Continue representing logq and loqr with the same ad
           // node.
-          this.logr += score;
+          this.logr += qscore;
           this.logq = this.logr;
         } else {
           // The reparameterization trick has been used earlier in the
           // execution. Update logq and logr independently.
-          this.logr += score;
-          this.logq += score;
+          this.logr += qscore;
+          this.logq += qscore;
         }
+        this.objective += ad.value(qscore) * this.logr
       }
 
       return val;
@@ -204,12 +208,15 @@ module.exports = function(env) {
 
     sampleTarget: function(dist, guideVal) {
       'use ad';
-      this.logp += dist.score(guideVal);
+      var score = dist.score(guideVal)
+      this.logp += score;
+      this.objective += ad.value(-score) * this.logr
     },
 
     factor: function(s, k, a, score) {
       'use ad';
       this.logp += score;
+      this.objective += ad.value(-score) * this.logr
       return k(s);
     },
 
@@ -248,8 +255,10 @@ module.exports = function(env) {
       var noreparam = sameAdNode(this.logq, this.logr);
       var m = state.multiplier;
 
-      this.logp += m * (this.logp - state.logp);
-      this.logq += m * (this.logq - state.logq);
+      var score = m * (this.logp - state.logp);
+      this.logp += score;
+      var qscore = m * (this.logq - state.logq);
+      this.logq += qscore;
       if (noreparam) {
         // The reparameterization trick has not been used yet.
         // Continue representing logq and loqr with the same ad node.
@@ -257,7 +266,9 @@ module.exports = function(env) {
       } else {
         this.logr += m * (this.logr - state.logr);
       }
-
+      this.objective += ad.value(qscore) * this.logr
+      
+      
       this.mapDataState[address] = undefined;
     },
 
